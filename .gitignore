@@ -1,0 +1,23 @@
+# Local build output
+/openarrayvpn
+
+# Local credentials and runtime state
+.env
+.env.*
+*.pem
+*.key
+known_servers
+
+# Reverse-engineering workspace, logs, and vendor installer payloads
+/ghidra/proj/
+/ghidra/*.log
+/pkgs/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# OS/editor files
+.DS_Store
+.idea/
+.vscode/

@@ -177,6 +177,28 @@ func handleHTTPProxy(c net.Conn, app *App) {
 	handleHTTPProxyReader(c, bufio.NewReader(c), app)
 }
 
+// proxyTarget accepts an authority with an optional port. Only a missing
+// port gets the default; malformed and out-of-range ports are rejected.
+func proxyTarget(authority string, defaultPort uint16) (string, uint16, error) {
+	host, portText, err := net.SplitHostPort(authority)
+	if err != nil {
+		if strings.HasPrefix(authority, "[") && strings.HasSuffix(authority, "]") {
+			host = authority[1 : len(authority)-1]
+			if ip := net.ParseIP(host); ip != nil && strings.Contains(host, ":") {
+				return host, defaultPort, nil
+			}
+		} else if authority != "" && !strings.ContainsAny(authority, ":[]") {
+			return authority, defaultPort, nil
+		}
+		return "", 0, fmt.Errorf("invalid proxy target %q", authority)
+	}
+	port, err := strconv.ParseUint(portText, 10, 16)
+	if err != nil || port == 0 || host == "" {
+		return "", 0, fmt.Errorf("invalid proxy target %q", authority)
+	}
+	return host, uint16(port), nil
+}
+
 func handleHTTPProxyReader(c net.Conn, br *bufio.Reader, app *App) {
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(60 * time.Second))
@@ -186,14 +208,14 @@ func handleHTTPProxyReader(c net.Conn, br *bufio.Reader, app *App) {
 	}
 
 	if req.Method == http.MethodConnect {
-		host, portStr, err := net.SplitHostPort(req.Host)
+		host, port, err := proxyTarget(req.Host, 443)
 		if err != nil {
-			host, portStr = req.Host, "443"
+			fmt.Fprint(c, "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
+			return
 		}
-		port, _ := strconv.Atoi(portStr)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		rc, err := app.Dial(ctx, "tcp", host, uint16(port))
+		rc, err := app.Dial(ctx, "tcp", host, port)
 		if err != nil {
 			log.Printf("http CONNECT %s: %v", req.Host, err)
 			fmt.Fprintf(c, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
@@ -212,14 +234,14 @@ func handleHTTPProxyReader(c net.Conn, br *bufio.Reader, app *App) {
 	if host == "" {
 		host = req.Host
 	}
-	h, p, err := net.SplitHostPort(host)
+	h, port, err := proxyTarget(host, 80)
 	if err != nil {
-		h, p = host, "80"
+		fmt.Fprint(c, "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
+		return
 	}
-	port, _ := strconv.Atoi(p)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	rc, err := app.Dial(ctx, "tcp", h, uint16(port))
+	rc, err := app.Dial(ctx, "tcp", h, port)
 	if err != nil {
 		log.Printf("http %s %s: %v", req.Method, host, err)
 		fmt.Fprintf(c, "HTTP/1.1 502 Bad Gateway\r\n\r\n")

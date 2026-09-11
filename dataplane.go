@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 )
 
@@ -53,14 +54,21 @@ func controlPacketError(pkt []byte, iplen int) (bool, error) {
 // dies; reconnect policy (always re-login) is ours, not the official one.
 func (t *Tunnel) Run(st *Stack) error {
 	done := make(chan struct{})
-	defer close(done)
 	errCh := make(chan error, 2)
-	go t.keepaliveLoop(errCh, done)
+	var wg sync.WaitGroup
+	wg.Add(2)
 	go func() {
+		defer wg.Done()
+		t.keepaliveLoop(errCh, done)
+	}()
+	go func() {
+		defer wg.Done()
 		errCh <- t.readLoop(st)
 	}()
 	err := <-errCh
+	close(done)
 	t.conn.Close() // unblock the other goroutine
+	wg.Wait()      // no more inbound injections after Run returns
 	return err
 }
 

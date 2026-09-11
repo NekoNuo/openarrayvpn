@@ -90,7 +90,6 @@ func main() {
 		<-ch
 		log.Printf("shutting down...")
 		app.Stop()
-		os.Exit(0)
 	}()
 
 	log.Printf("server: %s", cfg.Server)

@@ -89,17 +89,14 @@ type Tunnel struct {
 	Keepalive  int
 	FullTunnel bool // server set resource_group_flag&1
 
-	wrMu    sync.Mutex
-	lastTx  atomic.Int64 // unixnano
-	lastRx  atomic.Int64
-	expired bool
+	wrMu   sync.Mutex
+	lastTx atomic.Int64 // unixnano
+	lastRx atomic.Int64
 }
 
 func (t *Tunnel) MaskString() string {
 	return net.IP(t.Mask).String()
 }
-
-func (t *Tunnel) CookieExpired() bool { return t.expired }
 
 // WritePacket sends one raw IP packet over the tunnel.
 func (t *Tunnel) WritePacket(p []byte) error {

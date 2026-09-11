@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"html"
 	"io"
-	"log"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -25,10 +24,10 @@ const (
 )
 
 type AuthClient struct {
-	hc     *http.Client
-	base   string
-	jar    *cookiejar.Jar
-	role   string
+	hc   *http.Client
+	base string
+	jar  *cookiejar.Jar
+	role string
 	// Prompt asks the user for a secondary credential; question is the
 	// server-provided prompt text.
 	Prompt func(question string) (string, error)
@@ -39,10 +38,10 @@ type aaaMethod struct {
 	MethodDisp string `json:"method_disp"`
 }
 
-func NewAuthClient(server, caFile string, insecure bool) *AuthClient {
+func NewAuthClient(server, caFile string, insecure bool) (*AuthClient, error) {
 	tlsCfg, err := makeTLSConfig(server, caFile, insecure)
 	if err != nil {
-		log.Fatalf("TLS config: %v", err)
+		return nil, fmt.Errorf("TLS config: %w", err)
 	}
 	jar, _ := cookiejar.New(nil)
 	hc := &http.Client{
@@ -53,7 +52,7 @@ func NewAuthClient(server, caFile string, insecure bool) *AuthClient {
 			return http.ErrUseLastResponse
 		},
 	}
-	return &AuthClient{hc: hc, base: "https://" + server, jar: jar}
+	return &AuthClient{hc: hc, base: "https://" + server, jar: jar}, nil
 }
 
 func (c *AuthClient) Role() string { return c.role }
@@ -150,6 +149,7 @@ func (c *AuthClient) Login(ctx context.Context, user, pass string) (string, erro
 		bodyStr := string(body)
 
 		if strings.Contains(loc, welcomeMark) || c.hasSession() {
+			c.role = c.cookieValue("role_names")
 			return c.cookieHeader(), nil
 		}
 		// PKU-style secondary verification (id-card tail / phone digits):
@@ -203,7 +203,7 @@ func (c *AuthClient) doChallenge(ctx context.Context) (*http.Response, []byte, e
 			return strings.TrimSpace(line), err
 		}
 	}
-	answer, err := prompt(question)
+	answer, err := waitForInput(ctx, func() (string, error) { return prompt(question) })
 	if err != nil {
 		return nil, nil, err
 	}
@@ -212,6 +212,26 @@ func (c *AuthClient) doChallenge(ctx context.Context) (*http.Response, []byte, e
 	}
 
 	return c.postForm(ctx, challengePath, url.Values{"pwd": {answer}})
+}
+
+// A terminal read cannot be cancelled directly. Let shutdown finish even
+// while the input goroutine is waiting for a verification answer.
+func waitForInput(ctx context.Context, read func() (string, error)) (string, error) {
+	type result struct {
+		text string
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		text, err := read()
+		ch <- result{text, err}
+	}()
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case r := <-ch:
+		return r.text, r.err
+	}
 }
 
 // fetchChallengeJS retrieves the text holding the challenge variables:
@@ -294,11 +314,8 @@ func (c *AuthClient) msgCookie() string {
 func (c *AuthClient) hasSession() bool {
 	for _, ck := range c.jar.Cookies(c.baseURL()) {
 		if strings.HasPrefix(ck.Name, "ANsession") {
-			if v, err := url.QueryUnescape(ck.Value); err == nil {
+			if v, err := url.PathUnescape(ck.Value); err == nil {
 				if strings.Contains(v, "+") {
-					if c.role == "" {
-						c.role = c.cookieValue("role_names")
-					}
 					return true
 				}
 			}
@@ -373,7 +390,10 @@ func (c *AuthClient) answerForm(ctx context.Context, page string) (*http.Respons
 				continue
 			}
 			fmt.Fprintf(os.Stderr, "input %q (%s): ", attrs["placeholder"]+attrs["label"]+name, name)
-			line, _ := reader.ReadString('\n')
+			line, err := waitForInput(ctx, func() (string, error) { return reader.ReadString('\n') })
+			if err != nil {
+				return nil, nil, err
+			}
 			vals.Set(name, strings.TrimSpace(line))
 		}
 	}

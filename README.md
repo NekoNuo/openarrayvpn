@@ -4,15 +4,21 @@
 不接管系统网络栈/DNS，只在本地提供 **SOCKS5** 和 **HTTP 代理**，按服务器下发的
 路由表分流：校内网段走隧道，其余流量直连。
 
-协议实现基于对官方客户端（iSecSP / MotionPro，Array Networks AG 系列）的分析，
-隧道部分与 OpenConnect 的 `array.c` 一致（PKU 服务器未启用 DTLS 加速隧道，
-纯 TLS 通道即可）。
+协议流程和逆向分析见 [协议分析笔记](docs/protocol.md)。
 
 ## 编译
 
 ```sh
+# 开发构建
 go build -o openarrayvpn .
+
+# 发布构建
+go build -trimpath -ldflags='-s -w' -o openarrayvpn .
 ```
+
+发布构建移除本地源码路径、符号表和 DWARF 调试信息，缩小分发体积，
+不裁剪代理或 VPN 功能。开发构建保留调试信息；需要关闭优化和内联时，
+使用 `go build -gcflags='all=-N -l' -o openarrayvpn .`。
 
 ## 使用
 
@@ -38,10 +44,7 @@ ssh -o 'ProxyCommand=nc -X 5 -x 127.0.0.1:1080 %h %p' user@内网服务器
 ./openarrayvpn -mixed '' -socks 127.0.0.1:1080 -http 127.0.0.1:8080 -u <学工号>
 ```
 
-独立端口为额外监听，不能与 mixed 使用同一地址。mixed 采用
-[Mihomo](https://github.com/MetaCubeX/mihomo/blob/Meta/listener/mixed/mixed.go) 和
-[sing-box](https://github.com/SagerNet/sing-box/blob/testing/protocol/mixed/inbound.go)
-的首字节识别思路：`Peek(1)` 检测 SOCKS5，其余交给 HTTP 解析，复用同一缓冲读取器。
+独立端口为额外监听，不能与 mixed 使用同一地址。
 本项目支持 SOCKS5 TCP CONNECT、HTTP 和 HTTPS CONNECT，不支持 SOCKS4 或 UDP ASSOCIATE。
 默认仅绑定本机回环地址，代理入口不提供身份认证。
 
@@ -60,6 +63,8 @@ OAV_CHAL_PHONE=xxxx OAV_CHAL_ID=yyyyyy ./openarrayvpn ...
 ```
 
 ## 选项
+
+运行 `./openarrayvpn --help` 查看帮助；参数支持单横线和双横线。
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
@@ -91,50 +96,8 @@ Linux 为 `~/.config/openarrayvpn/known_servers`），之后每次连接比对�
 剩余候选数分配请求剩余时间，为地址回退保留时间。系统 DNS 回退查询
 最多 4 秒，并为随后的拨号预留时间。
 
-## 协议笔记（arrayvpn.pku.edu.cn, Rel.AG-HG-K.10.3.0.18）
-
-PKU 已验证的核心 L3 流程与官方实现基本对应（经 Ghidra 反编译
-`vl3vpn.dylib` 交叉核对），但仍有差异，见本节末尾。
-
-1. `GET /prx/000/http/localhost/login` → 获得匿名会话 cookie `ANsession*=VPN`
-2. `GET /prx/000/http/localhost/an_login.js` → AAA 方式列表（PKU 为 `北京大学VPN`/Radius）
-3. `POST /prx/000/http/localhost/login`，表单
-   `method/uname/pwd/pwd1/pwd2/deviceid/device_name/hardwareid/customer1`
-   - 成功：302 → `/welcome`，`ANsession*=VPN+<id>_<hash>`
-   - 失败：`_AN_msgStr` cookie 里是 URL 编码的错误信息
-   - 二次验证：302 → `/challenge`；问题文本在 `_AN_str_info_chal`
-     （官方客户端直接解析 `GET /prx/000/http/localhost/challenge` 响应，
-     本实现亦优先如此，拿不到再取页面引用的 `an_chal.js`），把答案作为
-     `pwd` POST 到 `/prx/000/http/localhost/challenge`
-4. `GET /prx/000/http/localhost/vpntunnel`（头：`appid: SSPVPN`, `clientid`,
-   `cpuid`, `hostname`, `payload-ip-version: 6`, `x-devtype: 6`）。
-   **201 才进入 JSON 配置协议**；200 是旧二进制配置协议，本实现明确拒绝
-5. 发 `conf50`（16B）→ 收 16B 头（首字节须为 `0x51`）+ JSON
-   （`keepalive_interval`，`allow_speed_tunnel=0` 即无 DTLS）；
-   发 `conf54`（48B：本机 IPv4 列表与 MAC 动态填写）→ 响应首字节须为
-   `0x55`，JSON 配置（`client_ipv4`/掩码/DNS/路由表/`resource_group_flag`，
-   IPv4 地址为小端序整数编码）；JSON 长度在响应头第 12–15 字节
-   （小端序），末尾可能有 NUL 填充
-6. `resource_group_flag & 1` 为服务器下发的全隧道模式：开启时所有 IPv4
-   走隧道（exclude 列表除外），IPv6 因隧道仅配置 IPv4 而明确拒绝
-7. 数据面：TLS 流承载裸 IPv4 包（可能跨记录拆分/合包）；`proto=0xff`
-   为控制包，第 12-13 字节（大端）为命令字：
-   - cmd 1 = keepalive：只记录，**不应答**（服务器会反射 DPD，回显会造成
-     乒乓风暴）——这一点与官方 `handle_atp_packets` 一致；保活调度/超时
-     细节（空闲即发、4 倍间隔判死）是本项目的策略
-   - cmd 2 = KILL_TUNNEL：第 16-19 字节大端为原因码（1=账号它处登录，
-     2=会话无效，3=会话过期，8=登出，0xe=同 clientid 第二会话）。
-     官方按原因分别处理，本项目策略是一律重连重登
-8. 登出：`GET /prx/000/http/localhost/logout`
-
-已知差异：官方请求带 `ANStandalone=true;SPA-Session=...` cookie，本实现
-不带（PKU 实测不需要）；`/vpntunnel` 短路径在 PKU 也可用，但本实现按
-官方使用完整路径。
-
 ## 局限
 
 - 仅网络层（L3）隧道；不支持桌面门户、应用级发布等 iSecSP 高级功能
 - 未实现 DTLS（PKU 服务器本身未开启）
 - 仅测试过校友/学生账密 + 两类二次验证；证书/RSA 令牌等认证方式未实现
-
-`probe/` 目录是协议分析用的 Python 一次性脚本，`pkgs/` 是官方安装包（不入库）。

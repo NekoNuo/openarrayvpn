@@ -5,11 +5,14 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // TLS certificate policy:
@@ -30,23 +33,40 @@ func pinFilePath() string {
 	return filepath.Join(dir, "openarrayvpn", "known_servers")
 }
 
-func loadPins(path string) map[string]string {
+func loadPins(path string) (map[string]string, error) {
 	pins := map[string]string{}
 	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return pins, nil
+	}
 	if err != nil {
-		return pins
+		return nil, fmt.Errorf("read server pins: %w", err)
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) == 2 {
-			pins[fields[0]] = fields[1]
+		if len(fields) == 0 {
+			continue
 		}
+		if len(fields) != 2 {
+			return nil, fmt.Errorf("malformed server pin in %s", path)
+		}
+		fp, err := hex.DecodeString(fields[1])
+		if err != nil || len(fp) != sha256.Size {
+			return nil, fmt.Errorf("invalid fingerprint for %s in %s", fields[0], path)
+		}
+		if previous, ok := pins[fields[0]]; ok && previous != strings.ToLower(fields[1]) {
+			return nil, fmt.Errorf("conflicting pins for %s in %s", fields[0], path)
+		}
+		pins[fields[0]] = strings.ToLower(fields[1])
 	}
-	return pins
+	return pins, nil
 }
 
 func savePin(path, host, fingerprint string) error {
-	pins := loadPins(path)
+	pins, err := loadPins(path)
+	if err != nil {
+		return err
+	}
 	pins[host] = fingerprint
 	var lines []string
 	for h, fp := range pins {
@@ -55,16 +75,39 @@ func savePin(path, host, fingerprint string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600)
+	// Replace atomically so an interrupted write cannot truncate trusted pins.
+	f, err := os.CreateTemp(filepath.Dir(path), ".known_servers-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
+	if _, err := f.WriteString(strings.Join(lines, "\n") + "\n"); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
 }
 
 // tofuPinPath is a var so tests can redirect it.
 var tofuPinPath = pinFilePath()
+var pinMu sync.Mutex
 
 // makeTLSConfig builds the TLS config for a server connection.
 // server is host:port; insecure disables all certificate checks.
 func makeTLSConfig(server, caFile string, insecure bool) (*tls.Config, error) {
-	host := strings.Split(server, ":")[0]
+	host, _, err := net.SplitHostPort(server)
+	if err != nil || host == "" {
+		return nil, fmt.Errorf("invalid server address %q: expected host:port", server)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		host = ip.String()
+	}
 	cfg := &tls.Config{ServerName: host}
 
 	if insecure {
@@ -89,11 +132,17 @@ func makeTLSConfig(server, caFile string, insecure bool) (*tls.Config, error) {
 	pinPath := tofuPinPath
 	cfg.InsecureSkipVerify = true // chain is privately issued; we pin instead
 	cfg.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+		pinMu.Lock()
+		defer pinMu.Unlock()
 		if len(rawCerts) == 0 {
 			return fmt.Errorf("server sent no certificate")
 		}
 		fp := hex.EncodeToString(sha256sum(rawCerts[0]))
-		known, ok := loadPins(pinPath)[host]
+		pins, err := loadPins(pinPath)
+		if err != nil {
+			return err
+		}
+		known, ok := pins[host]
 		if !ok {
 			if err := savePin(pinPath, host, fp); err != nil {
 				return fmt.Errorf("save server pin: %w", err)

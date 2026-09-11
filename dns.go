@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
@@ -14,7 +15,16 @@ import (
 
 // lookupViaTunnel sends a DNS query through the userspace stack to the
 // VPN-provided DNS server and returns A/AAAA records.
-func lookupViaTunnel(st *Stack, server net.IP, name string) ([]net.IP, error) {
+func lookupViaTunnel(ctx context.Context, st *Stack, server net.IP, name string) ([]net.IP, error) {
+	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	server = server.To4()
+	if server == nil {
+		return nil, fmt.Errorf("tunnel DNS requires an IPv4 server")
+	}
 	var id [2]byte
 	rand.Read(id[:])
 
@@ -29,7 +39,10 @@ func lookupViaTunnel(st *Stack, server net.IP, name string) ([]net.IP, error) {
 		return nil, err
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(4 * time.Second))
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
+	deadline, _ := ctx.Deadline()
+	conn.SetDeadline(deadline)
 	if _, err := conn.Write(q); err != nil {
 		return nil, err
 	}

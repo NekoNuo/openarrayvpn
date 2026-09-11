@@ -60,6 +60,9 @@ func (a *App) Stop() {
 func (a *App) Run() {
 	a.stopCh = make(chan struct{})
 
+	if a.cfg.Mixed != "" {
+		go serveMixed(a.cfg.Mixed, a)
+	}
 	if a.cfg.Socks != "" {
 		go serveSocks(a.cfg.Socks, a)
 	}

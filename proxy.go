@@ -14,6 +14,44 @@ import (
 	"time"
 )
 
+func serveMixed(addr string, app *App) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("mixed proxy listen %s: %v", addr, err)
+	}
+	serveMixedListener(ln, app)
+}
+
+func serveMixedListener(ln net.Listener, app *App) {
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go handleMixed(c, app)
+	}
+}
+
+func handleMixed(c net.Conn, app *App) {
+	defer c.Close()
+	c.SetReadDeadline(time.Now().Add(30 * time.Second))
+	br := bufio.NewReader(c)
+	head, err := br.Peek(1)
+	if err != nil {
+		return
+	}
+	// Keep the same reader so sniffing cannot discard pipelined payloads.
+	// Pass the original connection separately to preserve CloseWrite.
+	switch head[0] {
+	case 0x05:
+		handleSocksReader(c, br, app)
+	case 0x04: // SOCKS4 is not implemented.
+		return
+	default:
+		handleHTTPProxyReader(c, br, app)
+	}
+}
+
 func serveSocks(addr string, app *App) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -29,9 +67,12 @@ func serveSocks(addr string, app *App) {
 }
 
 func handleSocks(c net.Conn, app *App) {
+	handleSocksReader(c, bufio.NewReader(c), app)
+}
+
+func handleSocksReader(c net.Conn, br *bufio.Reader, app *App) {
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(30 * time.Second))
-	br := bufio.NewReader(c)
 
 	hdr := make([]byte, 2)
 	if _, err := io.ReadFull(br, hdr); err != nil || hdr[0] != 0x05 {
@@ -133,9 +174,12 @@ func serveHTTPProxy(addr string, app *App) {
 }
 
 func handleHTTPProxy(c net.Conn, app *App) {
+	handleHTTPProxyReader(c, bufio.NewReader(c), app)
+}
+
+func handleHTTPProxyReader(c net.Conn, br *bufio.Reader, app *App) {
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(60 * time.Second))
-	br := bufio.NewReader(c)
 	req, err := http.ReadRequest(br)
 	if err != nil {
 		return

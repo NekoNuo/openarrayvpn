@@ -89,10 +89,10 @@ type Tunnel struct {
 	Keepalive  int
 	FullTunnel bool // server set resource_group_flag&1
 
-	wrMu     sync.Mutex
-	lastTx   atomic.Int64 // unixnano
-	lastRx   atomic.Int64
-	expired  bool
+	wrMu    sync.Mutex
+	lastTx  atomic.Int64 // unixnano
+	lastRx  atomic.Int64
+	expired bool
 }
 
 func (t *Tunnel) MaskString() string {
@@ -151,7 +151,8 @@ func ConnectTunnel(server, caFile, cookie string, insecure bool) (*Tunnel, error
 	if err != nil {
 		return nil, err
 	}
-	host := strings.Split(server, ":")[0]
+	// Keep the complete authority, including IPv6 brackets and the port.
+	// makeTLSConfig has already validated host:port.
 	d := &net.Dialer{Timeout: 20 * time.Second}
 	conn, err := tls.DialWithDialer(d, "tcp", server, tlsCfg)
 	if err != nil {
@@ -168,7 +169,7 @@ func ConnectTunnel(server, caFile, cookie string, insecure bool) (*Tunnel, error
 		"cpuid: %s\r\n"+
 		"hostname: %s\r\n"+
 		"payload-ip-version: 6\r\n"+
-		"x-devtype: 6\r\n\r\n", host, cookie, clientID, clientID, hostname)
+		"x-devtype: 6\r\n\r\n", server, cookie, clientID, clientID, hostname)
 	// The handshake as a whole gets a deadline; cleared once established.
 	conn.SetDeadline(time.Now().Add(30 * time.Second))
 	if _, err := conn.Write([]byte(req)); err != nil {
@@ -317,12 +318,12 @@ type incExcGroup struct {
 
 func (t *Tunnel) parseInterfaceInfo(payload []byte) error {
 	var cfg struct {
-		ClientIPv4         uint32      `json:"client_ipv4"`
-		ClientIPv4Mask     uint32      `json:"client_ipv4_mask"`
-		ResourceGroupFlag  int         `json:"resource_group_flag"`
-		Include            incExcGroup `json:"include_network_resource"`
-		Exclude            incExcGroup `json:"exclude_network_resource"`
-		DNSServers         []struct {
+		ClientIPv4        uint32      `json:"client_ipv4"`
+		ClientIPv4Mask    uint32      `json:"client_ipv4_mask"`
+		ResourceGroupFlag int         `json:"resource_group_flag"`
+		Include           incExcGroup `json:"include_network_resource"`
+		Exclude           incExcGroup `json:"exclude_network_resource"`
+		DNSServers        []struct {
 			IPv4 []uint32 `json:"ipv4"`
 		} `json:"dns_servers"`
 	}

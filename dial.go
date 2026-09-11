@@ -54,55 +54,110 @@ func (d *SmartDialer) Resolve(ctx context.Context, name string) ([]net.IP, error
 		return []net.IP{ip}, nil
 	}
 	for _, srv := range d.tun.DNS {
-		if ips, err := lookupViaTunnel(d.stack, srv, name); err == nil && len(ips) > 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if ips, err := lookupViaTunnel(ctx, d.stack, srv, name); err == nil && len(ips) > 0 {
 			return ips, nil
 		}
 	}
 	return net.DefaultResolver.LookupIP(ctx, "ip", name)
 }
 
-// Dial resolves the host completely, classifies every final candidate
-// (tunnel-eligible IPv4 first), then dials them in order.
+// Dial tries tunnel-DNS answers first, classifying each final address.
+// System DNS is only queried if those candidates fail; it cannot delay
+// a successful internal lookup or replace an address with a fake IP.
 //
 //   - IPv6 never traverses the tunnel (the session provisions IPv4 only).
 //     In full-tunnel mode IPv6 candidates are skipped, not fatal; split
 //     mode sends them direct.
 //   - Excluded ranges stay direct even in full-tunnel mode.
 func (d *SmartDialer) Dial(ctx context.Context, network, host string, port uint16) (net.Conn, error) {
-	var tIPs, sIPs []net.IP
+	tried := make(map[string]bool)
 	if ip := net.ParseIP(host); ip != nil {
-		tIPs = []net.IP{ip}
-	} else {
-		// Tunnel DNS first (resolves internal names), system DNS merged
-		// in as additional candidates.
-		for _, srv := range d.tun.DNS {
-			if ips, err := lookupViaTunnel(d.stack, srv, host); err == nil && len(ips) > 0 {
-				tIPs = ips
-				break
-			}
-		}
-		sIPs, _ = net.DefaultResolver.LookupIP(ctx, "ip", host)
+		return d.dialCandidates(ctx, network, host, port, []net.IP{ip}, tried, 0)
 	}
-
-	tunnel, direct, err := d.planDial(tIPs, sIPs)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", host, err)
-	}
-
 	var lastErr error
-	for _, ip := range tunnel {
-		conn, err := d.dialStack(ctx, network, ip, port)
+	for _, srv := range d.tun.DNS {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		ips, err := lookupViaTunnel(ctx, d.stack, srv, host)
+		if err != nil || len(ips) == 0 {
+			lastErr = err
+			continue
+		}
+		// Reserve time for system DNS and its candidates if these fail.
+		conn, err := d.dialCandidates(ctx, network, host, port, ips, tried, 1)
 		if err == nil {
-			log.Printf("dial %s:%d via tunnel (%s)", host, port, ip)
 			return conn, nil
 		}
 		lastErr = err
+		break
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	resolveCtx, cancel := attemptContext(ctx, 2, 4*time.Second)
+	ips, err := net.DefaultResolver.LookupIP(resolveCtx, "ip", host)
+	cancel()
+	if err != nil {
+		return nil, fmt.Errorf("resolve %s using system DNS: %w (prior attempt: %v)", host, err, lastErr)
+	}
+	return d.dialCandidates(ctx, network, host, port, ips, tried, 0)
+}
+
+// attemptContext caps each operation and divides the remaining request
+// budget among pending attempts. An unreachable first IP cannot consume
+// the entire deadline before another address has been tried.
+func attemptContext(ctx context.Context, slots int, maximum time.Duration) (context.Context, context.CancelFunc) {
+	if deadline, ok := ctx.Deadline(); ok {
+		if share := time.Until(deadline) / time.Duration(slots); share < maximum {
+			maximum = share
+		}
+	}
+	return context.WithTimeout(ctx, maximum)
+}
+
+func (d *SmartDialer) dialCandidates(ctx context.Context, network, host string, port uint16, ips []net.IP, tried map[string]bool, reserve int) (net.Conn, error) {
+	tunnel, direct, err := d.planDial(ips, nil)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", host, err)
+	}
+	type candidate struct {
+		ip        net.IP
+		viaTunnel bool
+	}
+	var candidates []candidate
+	for _, ip := range tunnel {
+		if !tried[ip.String()] {
+			candidates = append(candidates, candidate{ip, true})
+		}
 	}
 	for _, ip := range direct {
-		dd := net.Dialer{Timeout: 15 * time.Second}
-		conn, err := dd.DialContext(ctx, network, net.JoinHostPort(ip.String(), fmt.Sprint(port)))
+		if !tried[ip.String()] {
+			candidates = append(candidates, candidate{ip, false})
+		}
+	}
+	var lastErr error
+	for i, c := range candidates {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		tried[c.ip.String()] = true
+		attempt, cancel := attemptContext(ctx, len(candidates)-i+reserve, 15*time.Second)
+		var conn net.Conn
+		var err error
+		route := "direct"
+		if c.viaTunnel {
+			route = "via tunnel"
+			conn, err = d.dialStack(attempt, network, c.ip, port)
+		} else {
+			conn, err = (&net.Dialer{}).DialContext(attempt, network, net.JoinHostPort(c.ip.String(), fmt.Sprint(port)))
+		}
+		cancel()
 		if err == nil {
-			log.Printf("dial %s:%d direct (%s)", host, port, ip)
+			log.Printf("dial %s:%d %s (%s)", host, port, route, c.ip)
 			return conn, nil
 		}
 		lastErr = err
@@ -113,8 +168,8 @@ func (d *SmartDialer) Dial(ctx context.Context, network, host string, port uint1
 	return nil, fmt.Errorf("no usable address for %s", host)
 }
 
-// planDial classifies resolved candidates. Resolution must be complete
-// before classification; every address actually dialed is classified.
+// planDial classifies resolved candidates; every address actually dialed
+// is classified, including newly resolved system-DNS fallback answers.
 // Tunnel-DNS results come first so a poisoned/fake-IP system resolver
 // cannot replace good answers.
 func (d *SmartDialer) planDial(tIPs, sIPs []net.IP) (tunnel, direct []net.IP, err error) {

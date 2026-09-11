@@ -24,12 +24,26 @@ OAV_USER=xxx OAV_PASS=yyy ./openarrayvpn   # 或用环境变量
 启动后：
 
 - SOCKS5 代理：`127.0.0.1:1080`（支持域名远端解析，经隧道 DNS）
-- HTTP 代理：`127.0.0.1:8080`（CONNECT + 普通 HTTP）
+- HTTP 代理：`127.0.0.1:1080`（CONNECT + 普通 HTTP，与 SOCKS5 共用 mixed 端口）
 
 ```sh
 curl --socks5-hostname 127.0.0.1:1080 https://its.pku.edu.cn/
-curl -x http://127.0.0.1:8080 https://its.pku.edu.cn/
+curl -x http://127.0.0.1:1080 https://its.pku.edu.cn/
+ssh -o 'ProxyCommand=nc -X 5 -x 127.0.0.1:1080 %h %p' user@内网服务器
 ```
+
+默认只监听一个端口。用 `-mixed 127.0.0.1:7890` 修改地址；恢复旧的双端口布局：
+
+```sh
+./openarrayvpn -mixed '' -socks 127.0.0.1:1080 -http 127.0.0.1:8080 -u <学工号>
+```
+
+独立端口为额外监听，不能与 mixed 使用同一地址。mixed 采用
+[Mihomo](https://github.com/MetaCubeX/mihomo/blob/Meta/listener/mixed/mixed.go) 和
+[sing-box](https://github.com/SagerNet/sing-box/blob/testing/protocol/mixed/inbound.go)
+的首字节识别思路：`Peek(1)` 检测 SOCKS5，其余交给 HTTP 解析，复用同一缓冲读取器。
+本项目支持 SOCKS5 TCP CONNECT、HTTP 和 HTTPS CONNECT，不支持 SOCKS4 或 UDP ASSOCIATE。
+默认仅绑定本机回环地址，代理入口不提供身份认证。
 
 ## 二次验证
 
@@ -51,8 +65,9 @@ OAV_CHAL_PHONE=xxxx OAV_CHAL_ID=yyyyyy ./openarrayvpn ...
 |---|---|---|
 | `-server` | `arrayvpn.pku.edu.cn:443` | VPN 服务器 |
 | `-u` / `-p` | — | 用户名/密码（或 `OAV_USER` / `OAV_PASS`） |
-| `-socks` | `127.0.0.1:1080` | SOCKS5 监听地址，空串关闭 |
-| `-http` | `127.0.0.1:8080` | HTTP 代理监听地址，空串关闭 |
+| `-mixed` | `127.0.0.1:1080` | SOCKS5 + HTTP 共用监听地址，空串关闭 |
+| `-socks` | 空 | 额外 SOCKS5 监听地址 |
+| `-http` | 空 | 额外 HTTP 代理监听地址 |
 | `-route-all` | false | 所有流量走隧道（默认仅校内网段） |
 | `-ca` | — | 严格校验服务器证书的 CA bundle |
 | `-insecure` | false | 完全关闭服务器证书检查 |
@@ -67,6 +82,14 @@ PKU 服务器证书由私有 CA（INFOSEC Technologies）签发，公开信任�
 Linux 为 `~/.config/openarrayvpn/known_servers`），之后每次连接比对，
 证书变化即拒绝连接并报错（确属 PKU 换证书时删除该文件即可）。有 CA bundle 时用 `-ca`
 做严格链校验；`-insecure` 完全关闭检查（仅限调试）。
+
+已有证书记录读取失败或格式损坏时会拒绝连接，不会重新信任证书；
+记录更新采用临时文件加原子替换，避免中断写入截断原记录。
+
+域名优先使用隧道 DNS 的结果并尝试连接，失败后才查询系统 DNS。
+每批结果都按最终 IP 重新分流，并去重；单次拨号最多 15 秒，且会按
+剩余候选数分配请求剩余时间，为地址回退保留时间。系统 DNS 回退查询
+最多 4 秒，并为随后的拨号预留时间。
 
 ## 协议笔记（arrayvpn.pku.edu.cn, Rel.AG-HG-K.10.3.0.18）
 

@@ -17,6 +17,7 @@ type Config struct {
 	Server   string
 	Username string
 	Password string
+	Mixed    string
 	Socks    string
 	HTTP     string
 	RouteAll bool
@@ -31,8 +32,9 @@ func main() {
 	flag.StringVar(&cfg.Server, "server", "arrayvpn.pku.edu.cn:443", "VPN server address")
 	flag.StringVar(&cfg.Username, "u", "", "username (or env OAV_USER)")
 	flag.StringVar(&cfg.Password, "p", "", "password (or env OAV_PASS; prompted if empty)")
-	flag.StringVar(&cfg.Socks, "socks", "127.0.0.1:1080", "SOCKS5 listen address (empty to disable)")
-	flag.StringVar(&cfg.HTTP, "http", "127.0.0.1:8080", "HTTP proxy listen address (empty to disable)")
+	flag.StringVar(&cfg.Mixed, "mixed", "127.0.0.1:1080", "mixed SOCKS5/HTTP listen address (empty to disable)")
+	flag.StringVar(&cfg.Socks, "socks", "", "additional SOCKS5 listen address (empty to disable)")
+	flag.StringVar(&cfg.HTTP, "http", "", "additional HTTP proxy listen address (empty to disable)")
 	flag.BoolVar(&cfg.RouteAll, "route-all", false, "send all traffic through the tunnel (default: only VPN subnets)")
 	flag.StringVar(&cfg.CAFile, "ca", "", "CA bundle PEM for strict server certificate verification (default: TOFU pinning)")
 	flag.BoolVar(&cfg.Insecure, "insecure", false, "disable all server certificate checks")
@@ -92,6 +94,9 @@ func main() {
 	}()
 
 	log.Printf("server: %s", cfg.Server)
+	if cfg.Mixed != "" {
+		log.Printf("Mixed proxy (SOCKS5 + HTTP): %s", cfg.Mixed)
+	}
 	if cfg.Socks != "" {
 		log.Printf("SOCKS5 proxy: socks5://%s", cfg.Socks)
 	}

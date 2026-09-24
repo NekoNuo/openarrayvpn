@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"log"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -28,6 +30,8 @@ type AuthClient struct {
 	base string
 	jar  *cookiejar.Jar
 	role string
+	// Method is the AAA method name to log in with; empty picks the first.
+	Method string
 	// Prompt asks the user for a secondary credential; question is the
 	// server-provided prompt text.
 	Prompt func(question string) (string, error)
@@ -38,10 +42,13 @@ type aaaMethod struct {
 	MethodDisp string `json:"method_disp"`
 }
 
-func NewAuthClient(server, caFile string, insecure bool) (*AuthClient, error) {
+func NewAuthClient(server, caFile string, insecure, legacyTLS bool) (*AuthClient, error) {
 	tlsCfg, err := makeTLSConfig(server, caFile, insecure)
 	if err != nil {
 		return nil, fmt.Errorf("TLS config: %w", err)
+	}
+	if legacyTLS {
+		enableLegacyTLS(tlsCfg)
 	}
 	jar, _ := cookiejar.New(nil)
 	hc := &http.Client{
@@ -72,10 +79,18 @@ func (c *AuthClient) Logout() {
 	}
 }
 
+// baseURL is where cookies are looked up. Some firmware scopes its cookies
+// (e.g. _AN_msgStr) to the portal path, so the site root would miss them.
 func (c *AuthClient) baseURL() *url.URL {
-	u, _ := url.Parse(c.base)
+	u, _ := url.Parse(c.base + "/prx/000/http/localhost/")
 	return u
 }
+
+// LoginRejectedError means the server refused the credentials. Retrying
+// with the same input cannot succeed and may lock the account.
+type LoginRejectedError struct{ Msg string }
+
+func (e *LoginRejectedError) Error() string { return "server: " + e.Msg }
 
 func (c *AuthClient) get(ctx context.Context, rawurl string) (*http.Response, []byte, error) {
 	if strings.HasPrefix(rawurl, "/") {
@@ -121,7 +136,7 @@ func (c *AuthClient) Login(ctx context.Context, user, pass string) (string, erro
 		return "", err
 	}
 
-	method, err := c.fetchAAAMethod(ctx)
+	method, err := c.fetchAAAMethod(ctx, c.Method)
 	if err != nil {
 		return "", fmt.Errorf("fetch AAA method: %w", err)
 	}
@@ -143,10 +158,15 @@ func (c *AuthClient) Login(ctx context.Context, user, pass string) (string, erro
 
 	for round := 0; round < 6; round++ {
 		if msg := c.msgCookie(); msg != "" {
-			return "", fmt.Errorf("server: %s", msg)
+			return "", &LoginRejectedError{msg}
 		}
 		loc := resp.Header.Get("Location")
 		bodyStr := string(body)
+		// Older firmware (AG 9.x) re-serves the login page with the error
+		// in a JS variable instead of setting _AN_msgStr.
+		if msg := jsString(bodyStr, "_AN_str_errormsg_login"); msg != "" {
+			return "", &LoginRejectedError{msg}
+		}
 
 		if strings.Contains(loc, welcomeMark) || c.hasSession() {
 			c.role = c.cookieValue("role_names")
@@ -274,8 +294,9 @@ func definesChallengeVar(s string) bool {
 }
 
 // fetchAAAMethod retrieves the site's AAA method list from an_login.js,
-// the same endpoint the official client uses.
-func (c *AuthClient) fetchAAAMethod(ctx context.Context) (string, error) {
+// the same endpoint the official client uses. want selects a method by
+// name; empty means the first one (the web portal's default selection).
+func (c *AuthClient) fetchAAAMethod(ctx context.Context, want string) (string, error) {
 	_, js, err := c.get(ctx, "/prx/000/http/localhost/an_login.js?devtype=6&localip=&deviceid=&end=1")
 	if err != nil {
 		return "", err
@@ -292,7 +313,20 @@ func (c *AuthClient) fetchAAAMethod(ctx context.Context) (string, error) {
 	if len(methods) == 0 {
 		return "", fmt.Errorf("site has no AAA methods")
 	}
-	return methods[0].Name, nil
+	names := make([]string, len(methods))
+	for i, m := range methods {
+		names[i] = m.Name
+	}
+	if want == "" {
+		if len(names) > 1 {
+			log.Printf("login methods: %s (using %q; choose with -method)", strings.Join(names, ", "), names[0])
+		}
+		return names[0], nil
+	}
+	if !slices.Contains(names, want) {
+		return "", fmt.Errorf("method %q not offered by server (available: %s)", want, strings.Join(names, ", "))
+	}
+	return want, nil
 }
 
 // msgCookie extracts the URL-encoded _AN_msgStr error cookie, if any.

@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/tls"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -41,6 +44,39 @@ func TestTOFUPinning(t *testing.T) {
 	}
 	if err := cfg2.VerifyPeerCertificate(nil, nil); err == nil {
 		t.Fatal("empty certificate list must fail")
+	}
+}
+
+func TestLegacyTLSHandshake(t *testing.T) {
+	// Mimic old Array AG firmware: TLS 1.2 only, static-RSA suites only.
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv.TLS = &tls.Config{
+		MaxVersion:   tls.VersionTLS12,
+		CipherSuites: []uint16{tls.TLS_RSA_WITH_AES_128_CBC_SHA},
+	}
+	srv.StartTLS()
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "https://")
+
+	dial := func(legacy bool) error {
+		cfg, err := makeTLSConfig(addr, "", true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if legacy {
+			enableLegacyTLS(cfg)
+		}
+		c, err := tls.Dial("tcp", addr, cfg)
+		if err == nil {
+			c.Close()
+		}
+		return err
+	}
+	if dial(false) == nil {
+		t.Fatal("default config should not negotiate static-RSA suites")
+	}
+	if err := dial(true); err != nil {
+		t.Fatalf("legacy handshake: %v", err)
 	}
 }
 

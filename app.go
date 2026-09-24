@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -56,7 +57,9 @@ func (a *App) initStop() {
 	a.stopInit.Do(func() { a.stopCh = make(chan struct{}) })
 }
 
-func (a *App) Run() {
+// Run keeps a session up until Stop. It returns early only when the server
+// rejects the login, since retrying the same credentials cannot succeed.
+func (a *App) Run() error {
 	a.initStop()
 
 	if a.cfg.Mixed != "" {
@@ -73,18 +76,22 @@ func (a *App) Run() {
 	for !a.stopped.Load() {
 		err := a.runOnce()
 		if a.stopped.Load() {
-			return
+			return nil
+		}
+		if rej := (*LoginRejectedError)(nil); errors.As(err, &rej) {
+			return err
 		}
 		log.Printf("session ended: %v; reconnecting in %s", err, backoff)
 		select {
 		case <-a.stopCh:
-			return
+			return nil
 		case <-time.After(backoff):
 		}
 		if backoff < 30*time.Second {
 			backoff *= 2
 		}
 	}
+	return nil
 }
 
 func (a *App) runOnce() error {
@@ -97,11 +104,12 @@ func (a *App) runOnce() error {
 		return context.Canceled
 	}
 
-	ac, err := NewAuthClient(a.cfg.Server, a.cfg.CAFile, a.cfg.Insecure)
+	ac, err := NewAuthClient(a.cfg.Server, a.cfg.CAFile, a.cfg.Insecure, a.cfg.LegacyTLS)
 	if err != nil {
 		return err
 	}
 	ac.Prompt = a.challengePrompt
+	ac.Method = a.cfg.Method
 	cookie, err := ac.Login(ctx, a.cfg.Username, a.cfg.Password)
 	if err != nil {
 		return fmt.Errorf("login: %w", err)
@@ -116,7 +124,7 @@ func (a *App) runOnce() error {
 		return ctx.Err()
 	}
 
-	tun, err := ConnectTunnel(a.cfg.Server, a.cfg.CAFile, cookie, a.cfg.Insecure)
+	tun, err := ConnectTunnel(a.cfg.Server, a.cfg.CAFile, cookie, a.cfg.Insecure, a.cfg.LegacyTLS)
 	if err != nil {
 		return fmt.Errorf("tunnel: %w", err)
 	}

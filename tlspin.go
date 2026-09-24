@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -24,6 +25,37 @@ import (
 //                   work; the official client doesn't verify by default
 //                   either (server_cert_check_on=0).
 //   -insecure     → no verification at all.
+//
+// -legacy-tls is orthogonal to the certificate policy: it only widens the
+// handshake parameters for old Array AG firmware (see enableLegacyTLS).
+
+// legacyRSASuites are static-RSA key exchange suites that Go no longer
+// offers by default (Go 1.22+). Some Array AG firmware supports nothing else.
+var legacyRSASuites = []uint16{
+	tls.TLS_RSA_WITH_AES_128_GCM_SHA256,
+	tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
+	tls.TLS_RSA_WITH_AES_128_CBC_SHA,
+	tls.TLS_RSA_WITH_AES_256_CBC_SHA,
+	tls.TLS_RSA_WITH_AES_128_CBC_SHA256,
+}
+
+// enableLegacyTLS caps the handshake at TLS 1.2 (old Array AG firmware drops
+// the connection on a TLS 1.3 ClientHello, which surfaces as EOF) and adds
+// the static-RSA suites. Go's secure defaults stay enabled and are preferred,
+// so a server that supports ECDHE still negotiates it.
+func enableLegacyTLS(cfg *tls.Config) {
+	cfg.MaxVersion = tls.VersionTLS12
+	suites := make([]uint16, 0, len(tls.CipherSuites())+len(legacyRSASuites))
+	for _, s := range tls.CipherSuites() {
+		suites = append(suites, s.ID)
+	}
+	for _, id := range legacyRSASuites {
+		if !slices.Contains(suites, id) {
+			suites = append(suites, id)
+		}
+	}
+	cfg.CipherSuites = suites
+}
 
 func pinFilePath() string {
 	dir, err := os.UserConfigDir()

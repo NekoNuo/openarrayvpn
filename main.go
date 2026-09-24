@@ -14,15 +14,17 @@ import (
 )
 
 type Config struct {
-	Server   string
-	Username string
-	Password string
-	Mixed    string
-	Socks    string
-	HTTP     string
-	RouteAll bool
-	CAFile   string
-	Insecure bool
+	Server    string
+	Username  string
+	Password  string
+	Mixed     string
+	Socks     string
+	HTTP      string
+	RouteAll  bool
+	CAFile    string
+	Insecure  bool
+	LegacyTLS bool
+	Method    string
 }
 
 var verbose bool
@@ -32,12 +34,14 @@ func main() {
 	flag.StringVar(&cfg.Server, "server", "arrayvpn.pku.edu.cn:443", "VPN server address")
 	flag.StringVar(&cfg.Username, "u", "", "username (or env OAV_USER)")
 	flag.StringVar(&cfg.Password, "p", "", "password (or env OAV_PASS; prompted if empty)")
+	flag.StringVar(&cfg.Method, "method", "", "AAA login method name (default: the server's first method)")
 	flag.StringVar(&cfg.Mixed, "mixed", "127.0.0.1:1080", "mixed SOCKS5/HTTP listen address (empty to disable)")
 	flag.StringVar(&cfg.Socks, "socks", "", "additional SOCKS5 listen address (empty to disable)")
 	flag.StringVar(&cfg.HTTP, "http", "", "additional HTTP proxy listen address (empty to disable)")
 	flag.BoolVar(&cfg.RouteAll, "route-all", false, "send all traffic through the tunnel (default: only VPN subnets)")
 	flag.StringVar(&cfg.CAFile, "ca", "", "CA bundle PEM for strict server certificate verification (default: TOFU pinning)")
 	flag.BoolVar(&cfg.Insecure, "insecure", false, "disable all server certificate checks")
+	flag.BoolVar(&cfg.LegacyTLS, "legacy-tls", false, "cap TLS at 1.2 and allow RSA key exchange suites (old servers failing with EOF)")
 	flag.BoolVar(&verbose, "v", false, "verbose packet logging")
 	flag.Parse()
 
@@ -102,5 +106,7 @@ func main() {
 	if cfg.HTTP != "" {
 		log.Printf("HTTP proxy:   http://%s", cfg.HTTP)
 	}
-	app.Run()
+	if err := app.Run(); err != nil {
+		log.Fatalf("login failed, not retrying: %v", err)
+	}
 }

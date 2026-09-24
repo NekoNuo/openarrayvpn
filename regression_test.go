@@ -129,7 +129,7 @@ func TestIPv6TunnelHTTPAuthority(t *testing.T) {
 	srv.Listener = ln
 	srv.StartTLS()
 	defer srv.Close()
-	tun, err := ConnectTunnel(authority, "", "", true)
+	tun, err := ConnectTunnel(authority, "", "", true, false)
 	if err != nil {
 		t.Fatal(err)
 	}

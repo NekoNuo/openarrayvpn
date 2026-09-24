@@ -70,12 +70,14 @@ OAV_CHAL_PHONE=xxxx OAV_CHAL_ID=yyyyyy ./openarrayvpn ...
 |---|---|---|
 | `-server` | `arrayvpn.pku.edu.cn:443` | VPN 服务器 |
 | `-u` / `-p` | — | 用户名/密码（或 `OAV_USER` / `OAV_PASS`） |
+| `-method` | 服务器第一个 | 登录认证方式名称（服务器有多个时启动日志会列出） |
 | `-mixed` | `127.0.0.1:1080` | SOCKS5 + HTTP 共用监听地址，空串关闭 |
 | `-socks` | 空 | 额外 SOCKS5 监听地址 |
 | `-http` | 空 | 额外 HTTP 代理监听地址 |
 | `-route-all` | false | 所有流量走隧道（默认仅校内网段） |
 | `-ca` | — | 严格校验服务器证书的 CA bundle |
 | `-insecure` | false | 完全关闭服务器证书检查 |
+| `-legacy-tls` | false | 兼容旧版服务器：TLS 最高 1.2，并启用静态 RSA 密钥交换套件（登录报 `EOF` 时使用） |
 | `-v` | false | 打印每个 IP 包的摘要 |
 
 ## 证书校验

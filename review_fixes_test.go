@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -35,7 +36,7 @@ func TestLoginSessionCookies(t *testing.T) {
 					}
 				}))
 				defer srv.Close()
-				c, err := NewAuthClient(strings.TrimPrefix(srv.URL, "https://"), "", true)
+				c, err := NewAuthClient(strings.TrimPrefix(srv.URL, "https://"), "", true, false)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -190,7 +191,7 @@ func TestRunOnceLogsOutAfterTunnelFailure(t *testing.T) {
 }
 
 func TestAuthInvalidCAReturnsError(t *testing.T) {
-	if _, e := NewAuthClient("example.com:443", t.TempDir()+"/missing.pem", false); e == nil {
+	if _, e := NewAuthClient("example.com:443", t.TempDir()+"/missing.pem", false, false); e == nil {
 		t.Fatal("expected CA error")
 	}
 }
@@ -212,5 +213,64 @@ func TestVerificationInputCancellation(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("shutdown blocked on terminal input")
+	}
+}
+
+func TestLoginRejectedDetected(t *testing.T) {
+	cases := map[string]func(w http.ResponseWriter){
+		// AG 9.x: login page re-served with the error in a JS variable.
+		"errormsg_var": func(w http.ResponseWriter) {
+			io.WriteString(w, `<script>var _AN_str_errormsg_login = "登录失败";</script>
+<form method=post action=/prx/000/http/localhost/login><input type="text" name="uname"></form>`)
+		},
+		// _AN_msgStr scoped to the portal path rather than "/".
+		"msg_cookie_scoped": func(w http.ResponseWriter) {
+			http.SetCookie(w, &http.Cookie{Name: "_AN_msgStr", Value: "%E7%99%BB%E5%BD%95%E5%A4%B1%E8%B4%A5", Path: "/prx/000/http/localhost/"})
+			w.Header().Set("Location", "/prx/000/http/localhost/login")
+			w.WriteHeader(302)
+		},
+	}
+	for name, reject := range cases {
+		t.Run(name, func(t *testing.T) {
+			var posted []string
+			srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case strings.HasSuffix(r.URL.Path, "an_login.js"):
+					io.WriteString(w, `_AN_aaa_method = [{"name":"a"},{"name":"b"}];`)
+				case r.Method == "POST":
+					r.ParseForm()
+					posted = append(posted, r.PostForm.Get("method"))
+					reject(w)
+				}
+			}))
+			defer srv.Close()
+			c, err := NewAuthClient(strings.TrimPrefix(srv.URL, "https://"), "", true, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.Method = "b"
+			_, err = c.Login(context.Background(), "user", "wrong")
+			var rej *LoginRejectedError
+			if !errors.As(err, &rej) || rej.Msg != "登录失败" {
+				t.Fatalf("want LoginRejectedError(登录失败), got %v", err)
+			}
+			if len(posted) != 1 || posted[0] != "b" {
+				t.Fatalf("posted methods %v, want exactly [b]", posted)
+			}
+		})
+	}
+}
+
+func TestLoginUnknownMethod(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "an_login.js") {
+			io.WriteString(w, `_AN_aaa_method = [{"name":"a"}];`)
+		}
+	}))
+	defer srv.Close()
+	c, _ := NewAuthClient(strings.TrimPrefix(srv.URL, "https://"), "", true, false)
+	c.Method = "zzz"
+	if _, err := c.Login(context.Background(), "u", "p"); err == nil || !strings.Contains(err.Error(), "available: a") {
+		t.Fatalf("want unknown-method error, got %v", err)
 	}
 }

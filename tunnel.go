@@ -143,10 +143,13 @@ func (t *Tunnel) Close() { t.conn.Close() }
 
 // ConnectTunnel establishes the TLS data channel and runs the
 // conf50/conf54 JSON negotiation.
-func ConnectTunnel(server, caFile, cookie string, insecure bool) (*Tunnel, error) {
+func ConnectTunnel(server, caFile, cookie string, insecure, legacyTLS bool) (*Tunnel, error) {
 	tlsCfg, err := makeTLSConfig(server, caFile, insecure)
 	if err != nil {
 		return nil, err
+	}
+	if legacyTLS {
+		enableLegacyTLS(tlsCfg)
 	}
 	// Keep the complete authority, including IPv6 brackets and the port.
 	// makeTLSConfig has already validated host:port.
